@@ -13,7 +13,10 @@ export const env = {
     bucketName: process.env.R2_BUCKET_NAME!
   },
   port: parseInt(process.env.PORT || '7000', 10),
-  artists: ['Satya Ananda', 'Gene Parade'] as const
+  artists: ['Satya Ananda', 'Gene Parade'] as const,
+  cors: {
+    origins: process.env.CORS_ORIGINS?.split(',') || ['*']
+  }
 } as const;
 
 // Validate required environment variables
