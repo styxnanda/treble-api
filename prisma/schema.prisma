@@ -1,0 +1,54 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Album {
+  id         BigInt   @id @default(autoincrement())
+  name       String
+  cover_path String?
+  created_at DateTime @default(now()) @db.Timestamptz()
+  updated_at DateTime @default(now()) @db.Timestamptz()
+  
+  // Relations
+  songs      Song[]
+}
+
+model Artist {
+  id         BigInt   @id @default(autoincrement())
+  name       String   @unique
+  image_path String?
+  biography  String?  @db.Text
+  created_at DateTime @default(now()) @db.Timestamptz()
+  updated_at DateTime @default(now()) @db.Timestamptz()
+  
+  // Relations
+  songs      Song[]
+}
+
+model Song {
+  id          BigInt   @id @default(autoincrement())
+  title       String
+  artist_id   BigInt
+  album_id    BigInt
+  duration    Float    @db.DoublePrecision
+  track_number Int      @db.SmallInt
+  path        String   @unique
+  created_at  DateTime @default(now()) @db.Timestamptz()
+  updated_at  DateTime @default(now()) @db.Timestamptz()
+  
+  // Relations
+  artist      Artist   @relation(fields: [artist_id], references: [id])
+  album       Album    @relation(fields: [album_id], references: [id])
+}

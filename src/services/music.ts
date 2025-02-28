@@ -1,22 +1,22 @@
 import { S3Client } from '../config/s3-client.js';
+import { prismaClient } from '../config/prisma-client.js';
 import { env } from '../config/env.js';
-import { ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { parseBuffer } from 'music-metadata';
-import { Album, Artist, Song } from '../types/music.js';
-import { Readable } from 'stream';
+import { 
+  AlbumListItem, 
+  AlbumResponse, 
+  ArtistResponse, 
+  SongListItem, 
+  SongResponse 
+} from '../types/music.js';
 
 // Singleton instance
 let instance: MusicService | null = null;
 
 export class MusicService {
   private s3Client: S3Client;
-  private songsCache: Song[] | null = null;
-  private albumsCache: Album[] | null = null;
-  private artistsCache: Artist[] | null = null;
-  private metadataCache: Map<string, any> = new Map();
   private urlCache: Map<string, { url: string, expiry: number }> = new Map();
-  private isPreloadingComplete = false;
   
   // Static method to get the singleton instance
   public static getInstance(): MusicService {
@@ -30,170 +30,227 @@ export class MusicService {
     this.s3Client = new S3Client();
   }
 
-  private async streamToBuffer(stream: Readable): Promise<Buffer> {
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks);
-  }
-
-  private async getMetadata(path: string) {
-    // Check cache first
-    if (this.metadataCache.has(path)) {
-      return this.metadataCache.get(path);
-    }
-
-    const response = await this.s3Client.send(new GetObjectCommand({
-      Bucket: env.r2.bucketName,
-      Key: path
-    }));
+  /**
+   * Get all songs from the database
+   */
+  async getAllSongs(): Promise<SongResponse[]> {
+    const songs = await prismaClient.song.findMany({
+      include: {
+        artist: true,
+        album: true
+      },
+      orderBy: [
+        { artist: { name: 'asc' } },
+        { album: { name: 'asc' } },
+        { track_number: 'asc' }
+      ]
+    });
     
-    if (!response.Body) throw new Error('No file content');
-    const buffer = await this.streamToBuffer(response.Body as Readable);
-    const metadata = await parseBuffer(buffer);
+    return songs.map((song: any) => ({
+      id: Number(song.id),
+      title: song.title,
+      artistId: Number(song.artist_id),
+      artistName: song.artist.name,
+      albumId: Number(song.album_id),
+      albumName: song.album.name,
+      duration: song.duration,
+      trackNumber: song.track_number
+    }));
+  }
+
+  /**
+   * Get all albums from the database with cover images
+   */
+  async getAllAlbums(): Promise<AlbumListItem[]> {
+    const albums = await prismaClient.album.findMany({
+      orderBy: { name: 'asc' }
+    });
     
-    // Store in cache
-    this.metadataCache.set(path, metadata);
-    return metadata;
-  }
-
-  async getAllSongs(): Promise<Song[]> {
-    // Return cached songs if available
-    if (this.songsCache) {
-      return this.songsCache;
-    }
-
-    const songs: Song[] = [];
-    const response = await this.s3Client.send(new ListObjectsV2Command({
-      Bucket: env.r2.bucketName,
-      Delimiter: '/'
-    }));
-
-    if (!response.CommonPrefixes) return songs;
-
-    // Use Promise.all to fetch album contents in parallel
-    await Promise.all(response.CommonPrefixes.map(async (prefix) => {
-      const albumResponse = await this.s3Client.send(new ListObjectsV2Command({
-        Bucket: env.r2.bucketName,
-        Prefix: prefix.Prefix
-      }));
-
-      if (!albumResponse.Contents) return;
-
-      // Use Promise.all to process song metadata in parallel
-      const songPromises = albumResponse.Contents
-        .filter(content => content.Key?.endsWith('.flac'))
-        .map(async (content) => {
-          const metadata = await this.getMetadata(content.Key!);
-          return {
-            id: content.Key!,
-            title: metadata.common.title || content.Key!.split('/').pop()?.replace('.flac', '') || '',
-            artist: metadata.common.artist || 'Unknown',
-            album: metadata.common.album || prefix.Prefix?.slice(0, -1) || 'Unknown',
-            duration: metadata.format.duration || 0,
-            path: content.Key!
-          };
-        });
-
-      const albumSongs = await Promise.all(songPromises);
-      songs.push(...albumSongs);
-    }));
-
-    // Cache results
-    this.songsCache = songs;
-    return songs;
-  }
-
-  async getAllAlbums(): Promise<Album[]> {
-    // Return cached albums if available
-    if (this.albumsCache) {
-      return this.albumsCache;
-    }
-
-    const albums: Album[] = [];
-    const response = await this.s3Client.send(new ListObjectsV2Command({
-      Bucket: env.r2.bucketName,
-      Delimiter: '/'
-    }));
-
-    if (!response.CommonPrefixes) return albums;
-
-    // Use Promise.all to process albums in parallel
-    await Promise.all(response.CommonPrefixes.map(async (prefix) => {
-      const albumName = prefix.Prefix?.slice(0, -1) || '';
-      const albumResponse = await this.s3Client.send(new ListObjectsV2Command({
-        Bucket: env.r2.bucketName,
-        Prefix: prefix.Prefix
-      }));
-
-      if (!albumResponse.Contents) return;
-
-      const coverFile = albumResponse.Contents.find(content => 
-        content.Key?.toLowerCase().includes('cover.')
-      );
-
-      // Use Promise.all for song metadata processing
-      const songPromises = albumResponse.Contents
-        .filter(content => content.Key?.endsWith('.flac'))
-        .map(async (content) => {
-          const metadata = await this.getMetadata(content.Key!);
-          return {
-            id: content.Key!,
-            title: metadata.common.title || content.Key!.split('/').pop()?.replace('.flac', '') || '',
-            artist: metadata.common.artist || 'Unknown',
-            album: albumName,
-            duration: metadata.format.duration || 0,
-            path: content.Key!
-          };
-        });
-
-      const songs = await Promise.all(songPromises);
-      const coverUrl = coverFile ? 
-        await this.getPreSignedUrl(coverFile.Key!) : 
-        '';
-
-      albums.push({
-        name: albumName,
-        coverUrl,
-        songs
-      });
-    }));
-
-    // Cache results
-    this.albumsCache = albums;
-    return albums;
-  }
-
-  async getAllArtists(): Promise<Artist[]> {
-    // Return cached artists if available
-    if (this.artistsCache) {
-      return this.artistsCache;
-    }
-
-    const artists = env.artists.map(name => ({
-      name,
-      albums: [] as string[],
-      songs: [] as Song[]
-    }));
-
-    const songs = await this.getAllSongs();
+    // Process albums to generate pre-signed URLs for covers
+    const albumsPromises = albums.map(async (album: any) => {
+      let coverUrl = null;
+      if (album.cover_path) {
+        coverUrl = await this.getPreSignedUrl(album.cover_path);
+      }
+      
+      return {
+        id: Number(album.id),
+        name: album.name,
+        coverUrl
+      };
+    });
     
-    for (const song of songs) {
-      const artist = artists.find(a => a.name === song.artist);
-      if (artist) {
-        artist.songs.push(song);
-        if (!artist.albums.includes(song.album)) {
-          artist.albums.push(song.album);
+    return Promise.all(albumsPromises);
+  }
+
+  /**
+   * Get full album details including songs
+   */
+  async getAlbumDetails(albumId: number): Promise<AlbumResponse | null> {
+    const album = await prismaClient.album.findUnique({
+      where: { id: BigInt(albumId) },
+      include: {
+        songs: {
+          include: {
+            artist: true
+          },
+          orderBy: { track_number: 'asc' }
         }
       }
+    });
+    
+    if (!album) {
+      return null;
     }
-
-    // Cache results
-    this.artistsCache = artists;
-    return artists;
+    
+    // Generate pre-signed URL for cover
+    let coverUrl = null;
+    if (album.cover_path) {
+      coverUrl = await this.getPreSignedUrl(album.cover_path);
+    }
+    
+    // Get distinct artists with songs on this album
+    const artistsOnAlbum = await prismaClient.artist.findMany({
+      where: {
+        songs: {
+          some: {
+            album_id: BigInt(albumId)
+          }
+        }
+      },
+      orderBy: { name: 'asc' }
+    });
+    
+    // Map songs with pre-signed URLs
+    const songsPromises = album.songs.map(async (song: any) => {
+      return {
+        id: Number(song.id),
+        title: song.title,
+        artistId: Number(song.artist_id),
+        artistName: song.artist.name,
+        albumId: Number(song.album_id),
+        albumName: album.name,
+        duration: song.duration,
+        trackNumber: song.track_number,
+        url: await this.getPreSignedUrl(song.path)
+      };
+    });
+    
+    const songs = await Promise.all(songsPromises);
+    
+    return {
+      id: Number(album.id),
+      name: album.name,
+      coverUrl,
+      songs,
+      artists: artistsOnAlbum.map((artist: any) => ({
+        id: Number(artist.id),
+        name: artist.name
+      }))
+    };
   }
 
+  /**
+   * Get all artists from the database
+   */
+  async getAllArtists(): Promise<{ id: number, name: string, imageUrl: string | null }[]> {
+    const artists = await prismaClient.artist.findMany({
+      orderBy: { name: 'asc' }
+    });
+    
+    // Process artists to generate pre-signed URLs for images
+    const artistsPromises = artists.map(async (artist: any) => {
+      let imageUrl = null;
+      if (artist.image_path) {
+        imageUrl = await this.getPreSignedUrl(artist.image_path);
+      }
+      
+      return {
+        id: Number(artist.id),
+        name: artist.name,
+        imageUrl
+      };
+    });
+    
+    return Promise.all(artistsPromises);
+  }
+
+  /**
+   * Get full artist details including albums and songs
+   */
+  async getArtistDetails(artistId: number): Promise<ArtistResponse | null> {
+    const artist = await prismaClient.artist.findUnique({
+      where: { id: BigInt(artistId) }
+    });
+    
+    if (!artist) {
+      return null;
+    }
+    
+    // Get all songs by this artist with album information
+    const songs = await prismaClient.song.findMany({
+      where: { artist_id: BigInt(artistId) },
+      include: { album: true },
+      orderBy: [
+        { album: { name: 'asc' } },
+        { track_number: 'asc' }
+      ]
+    });
+    
+    // Get all albums with songs by this artist
+    const albumIds = [...new Set(songs.map((song: any) => song.album_id))];
+    const albums = await prismaClient.album.findMany({
+      where: { id: { in: albumIds } },
+      orderBy: { name: 'asc' }
+    });
+    
+    // Generate pre-signed URL for artist image
+    let imageUrl = null;
+    if (artist.image_path) {
+      imageUrl = await this.getPreSignedUrl(artist.image_path);
+    }
+    
+    // Process albums to add cover URLs
+    const albumsPromises = albums.map(async (album: any) => {
+      let coverUrl = null;
+      if (album.cover_path) {
+        coverUrl = await this.getPreSignedUrl(album.cover_path);
+      }
+      
+      return {
+        id: Number(album.id),
+        name: album.name,
+        coverUrl
+      };
+    });
+    
+    const albumsWithCovers = await Promise.all(albumsPromises);
+    
+    // Map songs
+    const songList: SongListItem[] = songs.map((song: any) => ({
+      id: Number(song.id),
+      title: song.title,
+      artistId: Number(artistId),
+      artistName: artist.name,
+      albumId: Number(song.album_id),
+      albumName: song.album.name,
+      duration: song.duration,
+      trackNumber: song.track_number
+    }));
+    
+    return {
+      id: Number(artist.id),
+      name: artist.name,
+      imageUrl,
+      biography: artist.biography,
+      albums: albumsWithCovers,
+      songs: songList
+    };
+  }
+
+  /**
+   * Generate a pre-signed URL for an R2 object
+   */
   async getPreSignedUrl(path: string): Promise<string> {
     const now = Date.now();
     
@@ -205,7 +262,7 @@ export class MusicService {
         return cached.url;
       }
     }
-
+    
     const command = new GetObjectCommand({
       Bucket: env.r2.bucketName,
       Key: path
@@ -222,100 +279,48 @@ export class MusicService {
     return url;
   }
 
-  async getAlbumDetails(name: string): Promise<Album | null> {
-    const albums = await this.getAllAlbums();
-    return albums.find(album => album.name === name) || null;
-  }
-
-  async getArtistDetails(name: string): Promise<Artist | null> {
-    const artists = await this.getAllArtists();
-    return artists.find(artist => artist.name === name) || null;
-  }
-
-  // Method to clear cache if needed (e.g., when you want to refresh data)
-  clearCache() {
-    this.songsCache = null;
-    this.albumsCache = null;
-    this.artistsCache = null;
-    this.metadataCache.clear();
-    this.urlCache.clear();
-  }
-
-  // Fast methods for initial page load (minimal data)
-  async getBasicAlbumsList(): Promise<{ name: string, coverUrl?: string }[]> {
-    // If full cache is ready, use it
-    if (this.albumsCache) {
-      return this.albumsCache.map(album => ({
-        name: album.name,
-        coverUrl: album.coverUrl
-      }));
-    }
-
-    // Otherwise, get just the basic album info quickly
-    const albums: { name: string, coverUrl?: string }[] = [];
-    const response = await this.s3Client.send(new ListObjectsV2Command({
-      Bucket: env.r2.bucketName,
-      Delimiter: '/'
-    }));
-
-    if (!response.CommonPrefixes) return albums;
-
-    // Process albums in parallel but with minimal data
-    const albumPromises = response.CommonPrefixes.map(async (prefix) => {
-      const albumName = prefix.Prefix?.slice(0, -1) || '';
-      const albumResponse = await this.s3Client.send(new ListObjectsV2Command({
-        Bucket: env.r2.bucketName,
-        Prefix: prefix.Prefix,
-        MaxKeys: 10 // Limit to just a few files to find the cover quickly
-      }));
-
-      if (!albumResponse.Contents) return { name: albumName };
-
-      const coverFile = albumResponse.Contents.find(content => 
-        content.Key?.toLowerCase().includes('cover.')
-      );
-
-      const coverUrl = coverFile ? 
-        await this.getPreSignedUrl(coverFile.Key!) : 
-        '';
-
-      return {
-        name: albumName,
-        coverUrl
-      };
+  /**
+   * Get song details and generate a pre-signed URL
+   */
+  async getSongWithUrl(songId: number): Promise<SongResponse | null> {
+    const song = await prismaClient.song.findUnique({
+      where: { id: BigInt(songId) },
+      include: {
+        artist: true,
+        album: true
+      }
     });
-
-    return await Promise.all(albumPromises);
-  }
-
-  async getBasicArtistsList(): Promise<{ name: string }[]> {
-    // If cache is ready, use it
-    if (this.artistsCache) {
-      return this.artistsCache.map(artist => ({ name: artist.name }));
+    
+    if (!song) {
+      return null;
     }
     
-    // Otherwise just return the basic list from env
-    return env.artists.map(name => ({ name }));
+    const url = await this.getPreSignedUrl(song.path);
+    
+    return {
+      id: Number(song.id),
+      title: song.title,
+      artistId: Number(song.artist_id),
+      artistName: song.artist.name,
+      albumId: Number(song.album_id),
+      albumName: song.album.name,
+      duration: song.duration,
+      trackNumber: song.track_number,
+      url
+    };
   }
 
-  // Method to check if full preloading is complete
-  isFullyPreloaded(): boolean {
-    return this.isPreloadingComplete;
+  /**
+   * Get a pre-signed URL for a song by its path
+   */
+  async getSongUrlByPath(path: string): Promise<string> {
+    return this.getPreSignedUrl(path);
   }
 
-  // Start preloading all data
-  async startFullPreload(): Promise<void> {
-    if (this.isPreloadingComplete) return;
-
-    try {
-      await Promise.all([
-        this.getAllSongs(),
-        this.getAllAlbums(),
-        this.getAllArtists()
-      ]);
-      this.isPreloadingComplete = true;
-    } catch (error) {
-      console.error('Error during full preload:', error);
-    }
+  /**
+   * Clear the URL cache if needed
+   */
+  clearUrlCache() {
+    this.urlCache.clear();
   }
 }

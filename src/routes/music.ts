@@ -4,67 +4,79 @@ import { MusicService } from '../services/music.js';
 export async function musicRoutes(fastify: FastifyInstance) {
   const musicService = MusicService.getInstance();
 
-  // Get all songs with full metadata - potentially slower on first load
+  // Get all songs
   fastify.get('/songs', async () => {
     return await musicService.getAllSongs();
   });
 
-  // Get all albums with full metadata - potentially slower on first load
+  // Get all albums (lightweight list)
   fastify.get('/albums', async () => {
     return await musicService.getAllAlbums();
   });
 
-  // Get all artists with full metadata - potentially slower on first load
+  // Get all artists (lightweight list)
   fastify.get('/artists', async () => {
     return await musicService.getAllArtists();
   });
 
-  // Fast lightweight endpoints for initial UI rendering
-  fastify.get('/quick/albums', async () => {
-    // Start full preloading in the background
-    musicService.startFullPreload().catch(err => 
-      fastify.log.error('Background preload error:', err)
-    );
-    return await musicService.getBasicAlbumsList();
+  // Get album details by ID
+  fastify.get('/albums/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const albumId = parseInt(id, 10);
+    
+    if (isNaN(albumId)) {
+      return reply.status(400).send({ error: 'Invalid album ID format' });
+    }
+    
+    const album = await musicService.getAlbumDetails(albumId);
+    if (!album) {
+      return reply.status(404).send({ error: 'Album not found' });
+    }
+    
+    return album;
   });
 
-  fastify.get('/quick/artists', async () => {
-    // Start full preloading in the background
-    musicService.startFullPreload().catch(err => 
-      fastify.log.error('Background preload error:', err)
-    );
-    return await musicService.getBasicArtistsList();
+  // Get artist details by ID
+  fastify.get('/artists/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const artistId = parseInt(id, 10);
+    
+    if (isNaN(artistId)) {
+      return reply.status(400).send({ error: 'Invalid artist ID format' });
+    }
+    
+    const artist = await musicService.getArtistDetails(artistId);
+    if (!artist) {
+      return reply.status(404).send({ error: 'Artist not found' });
+    }
+    
+    return artist;
   });
-
-  // Check preload status
-  fastify.get('/preload-status', async () => {
-    return { complete: musicService.isFullyPreloaded() };
+  
+  // Get a specific song with its streaming URL
+  fastify.get('/songs/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const songId = parseInt(id, 10);
+    
+    if (isNaN(songId)) {
+      return reply.status(400).send({ error: 'Invalid song ID format' });
+    }
+    
+    const song = await musicService.getSongWithUrl(songId);
+    if (!song) {
+      return reply.status(404).send({ error: 'Song not found' });
+    }
+    
+    return song;
   });
-
-  // Get pre-signed URL for a song (path parameter version)
-  fastify.get('/song/:path', async (request) => {
-    const { path } = request.params as { path: string };
-    return { url: await musicService.getPreSignedUrl(path) };
-  });
-
+  
   // Get pre-signed URL for a song (query parameter version - easier for frontend integration)
-  fastify.get('/song-url', async (request) => {
+  fastify.get('/song-url', async (request, reply) => {
     const { path } = request.query as { path: string };
     if (!path) {
-      throw new Error('Path parameter is required');
+      return reply.status(400).send({ error: 'Path parameter is required' });
     }
-    return { url: await musicService.getPreSignedUrl(path) };
-  });
-
-  // Get album details
-  fastify.get('/album/:name', async (request) => {
-    const { name } = request.params as { name: string };
-    return await musicService.getAlbumDetails(name);
-  });
-
-  // Get artist details
-  fastify.get('/artist/:name', async (request) => {
-    const { name } = request.params as { name: string };
-    return await musicService.getArtistDetails(name);
+    
+    return { url: await musicService.getSongUrlByPath(path) };
   });
 }
