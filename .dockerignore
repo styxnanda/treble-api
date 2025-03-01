@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Node.js
+node_modules/
+dist/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Development files
+README.md
+ENDPOINTS.md
+SQL_INFO.md
+*.md
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  treble-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: treble-api
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # Database configuration - using Supabase
+      - DATABASE_URL=${DATABASE_URL}
+      - DIRECT_URL=${DIRECT_URL}
+      # R2/S3 configuration
+      - R2_ENDPOINT=${R2_ENDPOINT}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
+      # CORS configuration
+      - CORS_ORIGINS=${CORS_ORIGINS}
+    volumes:
+      - ./uploads:/app/uploads
+
+networks:
+  default:
+    name: treble-network
+    driver: bridge
